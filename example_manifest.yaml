@@ -1,0 +1,26 @@
+app_name: CRM Platform
+app_id: crm_platform
+functions:
+  - func_name: lead_scoring
+    queries:
+      - name: active_lead_scores
+        type: sql
+        query_source: queries/active_lead_scores.sql
+        meta:
+          owner_team: revenue_ops
+          refresh_cron: "0 3 * * *"
+      - name: churn_watch
+        type: sql
+        query_source: queries/churn_watch.sql
+        meta:
+          owner_team: customer_success
+          refresh_cron: "0 */6 * * *"
+
+  - func_name: onboarding
+    queries:
+      - name: onboarding_queue
+        type: sql
+        query_source: queries/onboarding_queue.sql
+        meta:
+          owner_team: implementation
+          sla_hours: 24

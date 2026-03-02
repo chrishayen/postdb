@@ -1,0 +1,27 @@
+app_name: CRM Platform
+app_id: crm_platform
+functions:
+  - func_name: lead_scoring
+    queries:
+      - name: active_lead_scores
+        type: sql
+        query_source: queries_update/active_lead_scores_v2.sql
+        meta:
+          owner_team: revenue_ops
+          refresh_cron: "0 2 * * *"
+          priority: high
+      - name: propensity_scores
+        type: sql
+        query_source: queries_update/propensity_scores.sql
+        meta:
+          owner_team: revenue_ops
+          refresh_cron: "15 */4 * * *"
+
+  - func_name: onboarding
+    queries:
+      - name: onboarding_queue
+        type: sql
+        query_source: queries_update/onboarding_queue_v2.sql
+        meta:
+          owner_team: implementation
+          sla_hours: 12

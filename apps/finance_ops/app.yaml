@@ -1,0 +1,26 @@
+app_name: Finance Ops
+app_id: finance_ops
+functions:
+  - func_name: collections
+    queries:
+      - name: overdue_invoices
+        type: sql
+        query_source: queries/overdue_invoices.sql
+        meta:
+          owner_team: accounts_receivable
+          currency: USD
+      - name: risk_accounts
+        type: sql
+        query_source: queries/risk_accounts.sql
+        meta:
+          owner_team: credit_control
+          threshold: medium
+
+  - func_name: revenue_reporting
+    queries:
+      - name: monthly_arr
+        type: sql
+        query_source: queries/monthly_arr.sql
+        meta:
+          owner_team: fp_and_a
+          cadence: monthly

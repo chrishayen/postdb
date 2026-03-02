@@ -1,0 +1,26 @@
+app_name: Support Hub
+app_id: support_hub
+functions:
+  - func_name: ticket_triage
+    queries:
+      - name: high_priority_backlog
+        type: sql
+        query_source: queries/high_priority_backlog.sql
+        meta:
+          owner_team: support_ops
+          page_on_call: true
+      - name: sla_breach_risk
+        type: sql
+        query_source: queries/sla_breach_risk.sql
+        meta:
+          owner_team: support_ops
+          escalation_window_minutes: 60
+
+  - func_name: quality
+    queries:
+      - name: csat_rollup
+        type: sql
+        query_source: queries/csat_rollup.sql
+        meta:
+          owner_team: support_enablement
+          lookback_weeks: 12

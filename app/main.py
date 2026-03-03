@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import secrets
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-import sqlalchemy as sa
-from sqlalchemy.exc import SQLAlchemyError
+from psycopg import AsyncConnection, Error as PsycopgError
 
 from app.config import DATABASE_URL, POSTDB_API_KEY
 from app.deployer import apply_manifest
-from app.manifest import ManifestError, parse_manifest_yaml
-
-
-engine = sa.create_engine(DATABASE_URL, future=True)
+from app.manifest import ManifestError, ManifestSpec, parse_manifest_yaml
 
 app = FastAPI(
     title="postdb",
@@ -23,6 +20,15 @@ app = FastAPI(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def open_db_connection() -> AsyncConnection[Any]:
+    return await AsyncConnection.connect(DATABASE_URL)
+
+
+async def deploy_manifest(manifest: ManifestSpec, raw_yaml: str) -> dict:
+    async with await open_db_connection() as conn:
+        return await apply_manifest(conn, manifest, raw_yaml)
 
 
 @app.post("/deploy/yaml")
@@ -48,8 +54,8 @@ async def deploy_yaml(request: Request) -> dict:
 
     try:
         manifest = parse_manifest_yaml(raw_yaml)
-        return apply_manifest(engine, manifest, raw_yaml)
+        return await deploy_manifest(manifest, raw_yaml)
     except ManifestError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except SQLAlchemyError as exc:
+    except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}") from exc

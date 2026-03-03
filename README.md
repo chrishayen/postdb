@@ -69,18 +69,45 @@ Notes:
 
 ```bash
 poetry install
+docker compose up -d postgres
 export POSTDB_API_KEY="dev-secret"
 poetry run uvicorn app.main:app --reload
 ```
 
-Default DB:
-- `sqlite:///./postdb.db`
+Default DB URL:
+- `postgresql://postdb:postdb@127.0.0.1:5432/postdb`
 
-Use Postgres:
+Override DB URL:
 
 ```bash
-poetry add psycopg[binary]
-export DATABASE_URL="postgresql+psycopg://user:pass@localhost:5432/postdb"
+export DATABASE_URL="postgresql://user:pass@127.0.0.1:5432/postdb"
+```
+
+## Run Postgres (Docker Compose)
+
+```bash
+docker compose up -d postgres
+docker compose ps
+```
+
+The compose service uses:
+- database: `postdb`
+- user: `postdb`
+- password: `postdb`
+- host port: `5432`
+
+## Dev Make Targets
+
+```bash
+make dev-db-up
+make dev-server
+make dev-deploy
+```
+
+Defaults are set in `Makefile` and can be overridden per command, for example:
+
+```bash
+POSTDB_API_KEY=my-key make dev-deploy
 ```
 
 ## Deploy One App

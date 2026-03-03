@@ -7,8 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-import sqlalchemy as sa
-from sqlalchemy.engine import Connection, Engine
+from psycopg import AsyncConnection, sql
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from app.config import POSTDB_APPS_ROOT
 from app.manifest import ManifestError, ManifestSpec
@@ -19,14 +20,18 @@ QUERY_TABLE_NAME = "app_queries"
 QUERY_KEY_COLUMNS = ("app_id", "func_name", "query_name")
 
 
-def apply_manifest(engine: Engine, manifest: ManifestSpec, raw_yaml: str) -> dict[str, Any]:
+async def apply_manifest(
+    conn: AsyncConnection[Any],
+    manifest: ManifestSpec,
+    raw_yaml: str,
+) -> dict[str, Any]:
     payload_sha = hashlib.sha256(raw_yaml.encode("utf-8")).hexdigest()
     query_rows, function_count = flatten_query_rows(manifest)
 
-    with engine.begin() as conn:
-        ensure_audit_table(conn)
-        table_created, columns_added, warnings = ensure_query_table(conn)
-        rows_inserted, rows_updated, rows_unchanged, function_actions = upsert_query_rows(
+    async with conn.transaction():
+        await ensure_audit_table(conn)
+        table_created, columns_added, warnings = await ensure_query_table(conn)
+        rows_inserted, rows_updated, rows_unchanged, function_actions = await upsert_query_rows(
             conn,
             query_rows,
         )
@@ -47,7 +52,7 @@ def apply_manifest(engine: Engine, manifest: ManifestSpec, raw_yaml: str) -> dic
             "function_actions": function_actions,
             "warnings": warnings,
         }
-        log_deployment(conn, manifest, payload_sha, result)
+        await log_deployment(conn, manifest, payload_sha, result)
         return result
 
 
@@ -129,63 +134,67 @@ def resolve_query_text(
     return query_text
 
 
-def ensure_audit_table(conn: Connection) -> None:
-    metadata = sa.MetaData()
-    sa.Table(
-        AUDIT_TABLE_NAME,
-        metadata,
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("applied_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("application", sa.String(255), nullable=True),
-        sa.Column("function", sa.String(255), nullable=True),
-        sa.Column("payload_sha256", sa.String(64), nullable=False),
-        sa.Column("result_json", sa.JSON, nullable=False),
+async def ensure_audit_table(conn: AsyncConnection[Any]) -> None:
+    await conn.execute(
+        sql.SQL(
+            """
+            CREATE TABLE IF NOT EXISTS {} (
+                id BIGSERIAL PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL,
+                application VARCHAR(255),
+                "function" VARCHAR(255),
+                payload_sha256 CHAR(64) NOT NULL,
+                result_json JSONB NOT NULL
+            )
+            """
+        ).format(sql.Identifier(AUDIT_TABLE_NAME))
     )
-    metadata.create_all(conn)
 
 
-def ensure_query_table(conn: Connection) -> tuple[bool, int, list[str]]:
-    inspector = sa.inspect(conn)
+async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, list[str]]:
     warnings: list[str] = []
 
-    if not inspector.has_table(QUERY_TABLE_NAME):
-        metadata = sa.MetaData()
-        sa.Table(
-            QUERY_TABLE_NAME,
-            metadata,
-            sa.Column("app_name", sa.String(255), nullable=False),
-            sa.Column("app_id", sa.String(255), nullable=False),
-            sa.Column("func_name", sa.String(255), nullable=False),
-            sa.Column("query_name", sa.String(255), nullable=False),
-            sa.Column("query_type", sa.String(100), nullable=False),
-            sa.Column("query_source", sa.String(1024), nullable=False),
-            sa.Column("query", sa.Text(), nullable=False),
-            sa.Column("meta", sa.JSON(), nullable=False),
-            sa.PrimaryKeyConstraint(*QUERY_KEY_COLUMNS, name="pk_app_queries"),
+    if not await table_exists(conn, QUERY_TABLE_NAME):
+        await conn.execute(
+            sql.SQL(
+                """
+                CREATE TABLE IF NOT EXISTS {} (
+                    app_name VARCHAR(255) NOT NULL,
+                    app_id VARCHAR(255) NOT NULL,
+                    func_name VARCHAR(255) NOT NULL,
+                    query_name VARCHAR(255) NOT NULL,
+                    query_type VARCHAR(100) NOT NULL,
+                    query_source VARCHAR(1024) NOT NULL,
+                    query TEXT NOT NULL,
+                    meta JSONB NOT NULL,
+                    CONSTRAINT pk_app_queries PRIMARY KEY (app_id, func_name, query_name)
+                )
+                """
+            ).format(sql.Identifier(QUERY_TABLE_NAME))
         )
-        metadata.create_all(conn)
         return True, 0, warnings
 
-    existing_columns = {col["name"] for col in inspector.get_columns(QUERY_TABLE_NAME)}
+    existing_columns = await get_table_columns(conn, QUERY_TABLE_NAME)
     required_columns = {
-        "app_name": sa.String(255),
-        "app_id": sa.String(255),
-        "func_name": sa.String(255),
-        "query_name": sa.String(255),
-        "query_type": sa.String(100),
-        "query_source": sa.String(1024),
-        "query": sa.Text(),
-        "meta": sa.JSON(),
+        "app_name": "VARCHAR(255)",
+        "app_id": "VARCHAR(255)",
+        "func_name": "VARCHAR(255)",
+        "query_name": "VARCHAR(255)",
+        "query_type": "VARCHAR(100)",
+        "query_source": "VARCHAR(1024)",
+        "query": "TEXT",
+        "meta": "JSONB",
     }
 
     columns_added = 0
     for column_name, column_type in required_columns.items():
         if column_name in existing_columns:
             continue
-        type_sql = str(column_type.compile(dialect=conn.dialect))
-        conn.execute(
-            sa.text(
-                f'ALTER TABLE "{QUERY_TABLE_NAME}" ADD COLUMN "{column_name}" {type_sql}'
+        await conn.execute(
+            sql.SQL("ALTER TABLE {} ADD COLUMN {} {}").format(
+                sql.Identifier(QUERY_TABLE_NAME),
+                sql.Identifier(column_name),
+                sql.SQL(column_type),
             )
         )
         columns_added += 1
@@ -193,9 +202,8 @@ def ensure_query_table(conn: Connection) -> tuple[bool, int, list[str]]:
             f"Added missing column '{column_name}' to existing '{QUERY_TABLE_NAME}' table."
         )
 
-    pk_info = inspector.get_pk_constraint(QUERY_TABLE_NAME) or {}
-    constrained_columns = set(pk_info.get("constrained_columns") or [])
-    if constrained_columns and constrained_columns != set(QUERY_KEY_COLUMNS):
+    constrained_columns = await get_primary_key_columns(conn, QUERY_TABLE_NAME)
+    if constrained_columns and set(constrained_columns) != set(QUERY_KEY_COLUMNS):
         warnings.append(
             f"Existing primary key on '{QUERY_TABLE_NAME}' is {sorted(constrained_columns)}; "
             f"logical upserts use {list(QUERY_KEY_COLUMNS)}."
@@ -204,13 +212,66 @@ def ensure_query_table(conn: Connection) -> tuple[bool, int, list[str]]:
     return False, columns_added, warnings
 
 
-def upsert_query_rows(
-    conn: Connection,
+async def table_exists(conn: AsyncConnection[Any], table_name: str) -> bool:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+            )
+            """,
+            (table_name,),
+        )
+        row = await cur.fetchone()
+    return bool(row and row[0])
+
+
+async def get_table_columns(conn: AsyncConnection[Any], table_name: str) -> set[str]:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = %s
+            """,
+            (table_name,),
+        )
+        rows = await cur.fetchall()
+    return {str(row[0]) for row in rows}
+
+
+async def get_primary_key_columns(conn: AsyncConnection[Any], table_name: str) -> list[str]:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_class t ON t.oid = i.indrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            JOIN LATERAL unnest(i.indkey::smallint[]) WITH ORDINALITY AS key(attnum, ord)
+              ON TRUE
+            JOIN pg_attribute a
+              ON a.attrelid = t.oid
+             AND a.attnum = key.attnum
+            WHERE i.indisprimary
+              AND n.nspname = current_schema()
+              AND t.relname = %s
+            ORDER BY key.ord
+            """,
+            (table_name,),
+        )
+        rows = await cur.fetchall()
+    return [str(row[0]) for row in rows]
+
+
+async def upsert_query_rows(
+    conn: AsyncConnection[Any],
     rows: list[dict[str, Any]],
 ) -> tuple[int, int, int, list[dict[str, Any]]]:
-    metadata = sa.MetaData()
-    table = sa.Table(QUERY_TABLE_NAME, metadata, autoload_with=conn)
-
     inserted = 0
     updated = 0
     unchanged = 0
@@ -218,39 +279,89 @@ def upsert_query_rows(
         lambda: {"created_count": 0, "updated_count": 0, "unchanged_count": 0}
     )
 
-    for row in rows:
-        stat_key = (row["app_name"], row["app_id"], row["func_name"])
-        stats = function_stats[stat_key]
+    async with conn.cursor(row_factory=dict_row) as cur:
+        for row in rows:
+            stat_key = (row["app_name"], row["app_id"], row["func_name"])
+            stats = function_stats[stat_key]
 
-        where_clause = sa.and_(
-            table.c.app_id == row["app_id"],
-            table.c.func_name == row["func_name"],
-            table.c.query_name == row["query_name"],
-        )
-        existing = conn.execute(
-            sa.select(
-                table.c.query_type,
-                table.c.query_source,
-                table.c.query,
-                table.c.meta,
+            await cur.execute(
+                sql.SQL(
+                    """
+                    SELECT query_type, query_source, query, meta
+                    FROM {}
+                    WHERE app_id = %s
+                      AND func_name = %s
+                      AND query_name = %s
+                    LIMIT 1
+                    """
+                ).format(sql.Identifier(QUERY_TABLE_NAME)),
+                (row["app_id"], row["func_name"], row["query_name"]),
             )
-            .where(where_clause)
-            .limit(1)
-        ).mappings().first()
-        if existing:
-            if not row_has_mutation(row, existing):
-                unchanged += 1
-                stats["unchanged_count"] += 1
+            existing = await cur.fetchone()
+            if existing:
+                if not row_has_mutation(row, existing):
+                    unchanged += 1
+                    stats["unchanged_count"] += 1
+                    continue
+
+                await cur.execute(
+                    sql.SQL(
+                        """
+                        UPDATE {}
+                        SET app_name = %s,
+                            query_type = %s,
+                            query_source = %s,
+                            query = %s,
+                            meta = %s
+                        WHERE app_id = %s
+                          AND func_name = %s
+                          AND query_name = %s
+                        """
+                    ).format(sql.Identifier(QUERY_TABLE_NAME)),
+                    (
+                        row["app_name"],
+                        row["query_type"],
+                        row["query_source"],
+                        row["query"],
+                        Jsonb(row["meta"]),
+                        row["app_id"],
+                        row["func_name"],
+                        row["query_name"],
+                    ),
+                )
+                updated += 1
+                stats["updated_count"] += 1
                 continue
 
-            conn.execute(sa.update(table).where(where_clause).values(**row))
-            updated += 1
-            stats["updated_count"] += 1
-            continue
-
-        conn.execute(sa.insert(table).values(**row))
-        inserted += 1
-        stats["created_count"] += 1
+            await cur.execute(
+                sql.SQL(
+                    """
+                    INSERT INTO {} (
+                        app_name,
+                        app_id,
+                        func_name,
+                        query_name,
+                        query_type,
+                        query_source,
+                        query,
+                        meta
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """
+                ).format(sql.Identifier(QUERY_TABLE_NAME)),
+                (
+                    row["app_name"],
+                    row["app_id"],
+                    row["func_name"],
+                    row["query_name"],
+                    row["query_type"],
+                    row["query_source"],
+                    row["query"],
+                    Jsonb(row["meta"]),
+                ),
+            )
+            inserted += 1
+            stats["created_count"] += 1
 
     function_actions: list[dict[str, Any]] = []
     for (app_name, app_id, func_name), stats in sorted(function_stats.items()):
@@ -291,21 +402,24 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
-def log_deployment(
-    conn: Connection,
+async def log_deployment(
+    conn: AsyncConnection[Any],
     manifest: ManifestSpec,
     payload_sha: str,
     result: dict[str, Any],
 ) -> None:
-    metadata = sa.MetaData()
-    log_table = sa.Table(AUDIT_TABLE_NAME, metadata, autoload_with=conn)
-
-    conn.execute(
-        sa.insert(log_table).values(
-            applied_at=datetime.now(timezone.utc),
-            application=manifest.app.app_id,
-            function=None,
-            payload_sha256=payload_sha,
-            result_json=result,
-        )
+    await conn.execute(
+        sql.SQL(
+            """
+            INSERT INTO {} (applied_at, application, "function", payload_sha256, result_json)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+        ).format(sql.Identifier(AUDIT_TABLE_NAME)),
+        (
+            datetime.now(timezone.utc),
+            manifest.app.app_id,
+            None,
+            payload_sha,
+            Jsonb(result),
+        ),
     )

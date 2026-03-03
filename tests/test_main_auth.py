@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-import tempfile
 import unittest
+from unittest.mock import AsyncMock
 
-import sqlalchemy as sa
 from fastapi import HTTPException
 from starlette.requests import Request
 
-import app.deployer as deployer
 import app.main as main
 
 
@@ -38,16 +35,11 @@ def build_request(body: str | bytes, headers: list[tuple[str, str]]) -> Request:
 class DeployEndpointAuthTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._orig_key = main.POSTDB_API_KEY
-        self._orig_engine = main.engine
-        self._orig_apps_root = deployer.POSTDB_APPS_ROOT
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmp.name)
+        self._orig_deploy_manifest = main.deploy_manifest
 
     def tearDown(self) -> None:
         main.POSTDB_API_KEY = self._orig_key
-        main.engine = self._orig_engine
-        deployer.POSTDB_APPS_ROOT = self._orig_apps_root
-        self._tmp.cleanup()
+        main.deploy_manifest = self._orig_deploy_manifest
 
     async def test_missing_server_key_returns_500(self) -> None:
         main.POSTDB_API_KEY = None
@@ -71,13 +63,15 @@ class DeployEndpointAuthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_valid_key_allows_deploy(self) -> None:
         app_id = "crm_platform"
-        app_dir = self.tmp_path / "apps" / app_id / "queries"
-        app_dir.mkdir(parents=True, exist_ok=True)
-        (app_dir / "active.sql").write_text("SELECT 1;", encoding="utf-8")
-
-        deployer.POSTDB_APPS_ROOT = str(self.tmp_path / "apps")
-        main.engine = sa.create_engine("sqlite:///:memory:", future=True)
         main.POSTDB_API_KEY = "secret"
+        main.deploy_manifest = AsyncMock(
+            return_value={
+                "app_id": app_id,
+                "rows_inserted": 1,
+                "rows_updated": 0,
+                "rows_unchanged": 0,
+            }
+        )
 
         body = f"""
 app_name: CRM Platform
@@ -97,6 +91,7 @@ functions:
         self.assertEqual(1, result["rows_inserted"])
         self.assertEqual(0, result["rows_updated"])
         self.assertEqual(0, result["rows_unchanged"])
+        main.deploy_manifest.assert_awaited_once()
 
 
 if __name__ == "__main__":

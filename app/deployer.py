@@ -37,7 +37,7 @@ async def apply_manifest(
         result = {
             "payload_sha256": payload_sha,
             "applied_at": datetime.now(timezone.utc).isoformat(),
-            "app_id": manifest.app.app_id,
+            "app_id": manifest.app_id,
             "apps_processed": 1,
             "functions_processed": function_count,
             "queries_processed": len(query_rows),
@@ -56,13 +56,13 @@ async def apply_manifest(
 
 def flatten_query_rows(manifest: ManifestSpec) -> tuple[list[dict[str, Any]], int]:
     rows: list[dict[str, Any]] = []
-    function_count = len(manifest.app.functions)
-    for function in manifest.app.functions:
+    function_count = len(manifest.functions)
+    for function in manifest.functions:
         for query in function.queries:
             rows.append(
                 {
-                    "app_name": manifest.app.app_name,
-                    "app_id": manifest.app.app_id,
+                    "app_name": manifest.app_name,
+                    "app_id": manifest.app_id,
                     "func_name": function.func_name,
                     "query_name": query.name,
                     "query_type": query.type_name,
@@ -350,7 +350,7 @@ async def log_deployment(
         ).format(sql.Identifier(AUDIT_TABLE_NAME)),
         (
             datetime.now(timezone.utc),
-            manifest.app.app_id,
+            manifest.app_id,
             None,
             payload_sha,
             Jsonb(result),

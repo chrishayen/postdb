@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 import yaml
 
 
@@ -14,30 +14,35 @@ class ManifestError(ValueError):
     """Raised when an incoming manifest is invalid."""
 
 
-@dataclass(slots=True)
-class QuerySpec:
-    name: str
-    type_name: str
+class QuerySpec(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    name: str = Field(min_length=1)
+    type_name: str = Field(alias="type", min_length=1)
     query: Any
-    meta: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
+    query_source: str | None = None
 
 
-@dataclass(slots=True)
-class FunctionSpec:
-    func_name: str
-    queries: list[QuerySpec]
+class FunctionSpec(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    func_name: str = Field(min_length=1)
+    queries: list[QuerySpec] = Field(min_length=1)
 
 
-@dataclass(slots=True)
-class AppSpec:
-    app_name: str
-    app_id: str
-    functions: list[FunctionSpec]
+class ManifestSpec(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
+    app_name: str = Field(min_length=1)
+    app_id: str | None = None
+    functions: list[FunctionSpec] = Field(min_length=1)
 
-@dataclass(slots=True)
-class ManifestSpec:
-    app: AppSpec
+    @model_validator(mode="after")
+    def set_default_app_id(self) -> ManifestSpec:
+        if not self.app_id:
+            self.app_id = to_snake_case(self.app_name)
+        return self
 
 
 def parse_manifest_yaml(raw_yaml: str) -> ManifestSpec:
@@ -49,122 +54,12 @@ def parse_manifest_yaml(raw_yaml: str) -> ManifestSpec:
 
 
 def parse_manifest_dict(raw: Any) -> ManifestSpec:
-    if not isinstance(raw, dict):
-        raise ManifestError("Manifest body must be a YAML mapping.")
-    if "tables" in raw:
-        raise ManifestError("Deprecated format: use top-level app_name/functions, not tables.")
-    if "apps" in raw:
-        raise ManifestError("Use one app per file: remove 'apps' array and keep one top-level app definition.")
-
-    app = parse_app_spec(raw)
-    return ManifestSpec(app=app)
-
-
-def parse_app_spec(raw_app: dict[str, Any]) -> AppSpec:
-    app_name = require_non_empty_str(raw_app.get("app_name"), "app_name")
-    app_id_raw = raw_app.get("app_id")
-    app_id = infer_or_validate_app_id(app_name, app_id_raw, "app_id")
-
-    functions_raw = raw_app.get("functions")
-    if not isinstance(functions_raw, list) or not functions_raw:
-        raise ManifestError("App manifest must include a non-empty functions list.")
-    functions = [
-        parse_function_spec(item, app_name, idx)
-        for idx, item in enumerate(functions_raw, start=1)
-    ]
-
-    func_names = [f.func_name for f in functions]
-    if len(func_names) != len(set(func_names)):
-        raise ManifestError(f"App '{app_name}' contains duplicate func_name values.")
-
-    return AppSpec(app_name=app_name, app_id=app_id, functions=functions)
-
-
-def parse_function_spec(raw_function: Any, app_name: str, func_idx: int) -> FunctionSpec:
-    if not isinstance(raw_function, dict):
-        raise ManifestError(f"App '{app_name}' functions[{func_idx}] must be a mapping.")
-
-    func_name = require_non_empty_str(
-        raw_function.get("func_name"),
-        f"App '{app_name}' functions[{func_idx}].func_name",
-    )
-
-    queries_raw = raw_function.get("queries")
-    if not isinstance(queries_raw, list) or not queries_raw:
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' must include a non-empty queries list."
-        )
-    queries = [
-        parse_query_spec(item, app_name, func_name, idx)
-        for idx, item in enumerate(queries_raw, start=1)
-    ]
-
-    query_names = [q.name for q in queries]
-    if len(query_names) != len(set(query_names)):
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' contains duplicate query names."
-        )
-
-    return FunctionSpec(func_name=func_name, queries=queries)
-
-
-def parse_query_spec(
-    raw_query: Any,
-    app_name: str,
-    func_name: str,
-    query_idx: int,
-) -> QuerySpec:
-    if not isinstance(raw_query, dict):
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' queries[{query_idx}] must be a mapping."
-        )
-
-    if any(k in raw_query for k in ("query_name", "query_type")):
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' queries[{query_idx}] uses deprecated keys. "
-            "Use: name, type, query, meta."
-        )
-
-    query_name = require_non_empty_str(
-        raw_query.get("name"),
-        f"App '{app_name}' function '{func_name}' queries[{query_idx}].name",
-    )
-    query_type = require_non_empty_str(
-        raw_query.get("type"),
-        f"App '{app_name}' function '{func_name}' query '{query_name}' type",
-    )
-    sentinel = object()
-    query_value = raw_query.get("query", sentinel)
-    if query_value is sentinel:
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' query '{query_name}' query is required."
-        )
-
-    raw_meta = raw_query.get("meta", {})
-    if raw_meta is None:
-        raw_meta = {}
-    if not isinstance(raw_meta, dict):
-        raise ManifestError(
-            f"App '{app_name}' function '{func_name}' query '{query_name}' meta must be a mapping."
-        )
-    meta = {str(k): v for k, v in raw_meta.items()}
-
-    return QuerySpec(
-        name=query_name,
-        type_name=query_type,
-        query=query_value,
-        meta=meta,
-    )
-
-
-def infer_or_validate_app_id(app_name: str, app_id_raw: Any, path: str) -> str:
-    if app_id_raw is None:
-        return to_snake_case(app_name)
-    if not isinstance(app_id_raw, str) or not app_id_raw:
-        raise ManifestError(f"{path} must be a non-empty string if provided.")
-    if not SNAKE_CASE_RE.match(app_id_raw):
-        raise ManifestError(f"{path} must be snake_case (example: customer_portal).")
-    return app_id_raw
+    if raw is None:
+        raw = {}
+    try:
+        return ManifestSpec.model_validate(raw)
+    except ValidationError as exc:
+        raise ManifestError(str(exc)) from exc
 
 
 def to_snake_case(value: str) -> str:
@@ -178,9 +73,3 @@ def to_snake_case(value: str) -> str:
             f"Could not infer a valid snake_case app_id from app_name '{value}'. Provide app_id explicitly."
         )
     return normalized
-
-
-def require_non_empty_str(raw_value: Any, path: str) -> str:
-    if not isinstance(raw_value, str) or not raw_value.strip():
-        raise ManifestError(f"{path} must be a non-empty string.")
-    return raw_value.strip()

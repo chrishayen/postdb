@@ -4,11 +4,13 @@ import secrets
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import ValidationError
 from psycopg import AsyncConnection, Error as PsycopgError
+import yaml
 
 from app.config import DATABASE_URL, POSTDB_API_KEY
 from app.deployer import apply_manifest
-from app.manifest import ManifestError, ManifestSpec, parse_manifest_yaml
+from app.manifest import ManifestSpec
 
 app = FastAPI(
     title="postdb",
@@ -53,9 +55,14 @@ async def deploy_yaml(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Request body must be UTF-8 encoded YAML.") from exc
 
     try:
-        manifest = parse_manifest_yaml(raw_yaml)
+        loaded = yaml.safe_load(raw_yaml)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid YAML: {exc}") from exc
+
+    try:
+        manifest = ManifestSpec.model_validate(loaded)
         return await deploy_manifest(manifest, raw_yaml)
-    except ManifestError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}") from exc

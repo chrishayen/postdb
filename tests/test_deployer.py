@@ -142,42 +142,5 @@ functions:
         self.assertEqual(0, result["rows_updated"])
         self.assertEqual(0, result["rows_unchanged"])
 
-    async def test_legacy_query_source_column_is_compatible(self) -> None:
-        assert self.conn is not None
-        await self.conn.execute(
-            """
-            CREATE TABLE app_queries (
-                app_name VARCHAR(255) NOT NULL,
-                app_id VARCHAR(255) NOT NULL,
-                func_name VARCHAR(255) NOT NULL,
-                query_name VARCHAR(255) NOT NULL,
-                query_type VARCHAR(100) NOT NULL,
-                query_source VARCHAR(1024) NOT NULL,
-                query TEXT NOT NULL,
-                meta JSONB NOT NULL,
-                CONSTRAINT pk_app_queries PRIMARY KEY (app_id, func_name, query_name)
-            )
-            """
-        )
-
-        raw = """
-app_name: CRM Platform
-app_id: crm_platform
-functions:
-  - func_name: lead_scoring
-    queries:
-      - name: active_lead_scores
-        type: json
-        query:
-          version: 2
-        meta: {}
-"""
-        manifest = parse_manifest_yaml(raw)
-        result = await deployer.apply_manifest(self.conn, manifest, raw)
-
-        self.assertEqual(1, result["rows_inserted"])
-        self.assertIn("Converted column 'query' to JSONB", " ".join(result["warnings"]))
-
-
 if __name__ == "__main__":
     unittest.main()

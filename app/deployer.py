@@ -113,17 +113,6 @@ async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, lis
         return True, 0, warnings
 
     existing_columns = await get_table_columns(conn, QUERY_TABLE_NAME)
-    if "query_source" in existing_columns:
-        await conn.execute(
-            sql.SQL("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT ''").format(
-                sql.Identifier(QUERY_TABLE_NAME),
-                sql.Identifier("query_source"),
-            )
-        )
-        warnings.append(
-            f"Set default value for legacy 'query_source' column on '{QUERY_TABLE_NAME}'."
-        )
-
     required_columns = {
         "app_name": "VARCHAR(255)",
         "app_id": "VARCHAR(255)",
@@ -148,19 +137,6 @@ async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, lis
         columns_added += 1
         warnings.append(
             f"Added missing column '{column_name}' to existing '{QUERY_TABLE_NAME}' table."
-        )
-
-    query_column_type = await get_column_type(conn, QUERY_TABLE_NAME, "query")
-    if query_column_type and query_column_type != "jsonb":
-        await conn.execute(
-            sql.SQL("ALTER TABLE {} ALTER COLUMN {} TYPE JSONB USING to_jsonb({})").format(
-                sql.Identifier(QUERY_TABLE_NAME),
-                sql.Identifier("query"),
-                sql.Identifier("query"),
-            )
-        )
-        warnings.append(
-            f"Converted column 'query' to JSONB on existing '{QUERY_TABLE_NAME}' table."
         )
 
     constrained_columns = await get_primary_key_columns(conn, QUERY_TABLE_NAME)
@@ -203,24 +179,6 @@ async def get_table_columns(conn: AsyncConnection[Any], table_name: str) -> set[
         )
         rows = await cur.fetchall()
     return {str(row[0]) for row in rows}
-
-
-async def get_column_type(conn: AsyncConnection[Any], table_name: str, column_name: str) -> str | None:
-    async with conn.cursor() as cur:
-        await cur.execute(
-            """
-            SELECT data_type
-            FROM information_schema.columns
-            WHERE table_schema = current_schema()
-              AND table_name = %s
-              AND column_name = %s
-            """,
-            (table_name, column_name),
-        )
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    return str(row[0])
 
 
 async def get_primary_key_columns(conn: AsyncConnection[Any], table_name: str) -> list[str]:

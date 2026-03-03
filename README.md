@@ -10,7 +10,6 @@ The service writes to `app_queries` with columns:
 - `func_name`
 - `query_name`
 - `query_type`
-- `query_source`
 - `query`
 - `meta`
 
@@ -40,10 +39,9 @@ apps/
 ```
 
 Default root is `apps/`. You can override with:
-- `POSTDB_APPS_ROOT` (server-side file resolution)
 - `POSTDB_APPS_DIR` (bulk deploy script scanning)
 
-## YAML Contract
+## YAML Authoring Contract (Client-Side)
 
 One app per file (`apps/<app_id>/app.yaml`):
 
@@ -61,9 +59,27 @@ functions:
 ```
 
 Notes:
-- `query_source` is a query file path, not inline SQL text.
-- Query file paths must be relative and must stay inside `apps/<app_id>/`.
-- Query file content is loaded by the API and stored in `query` while the path is stored in `query_source`.
+- `query_source` is client-side only.
+- The deploy client reads files from `query_source` and sends the materialized value as `query`.
+- The API accepts `query_source` if present, but ignores it.
+- `query` can be SQL text, JSON documents, or other typed payloads (depends on `type`).
+
+## API Payload Contract
+
+The server requires `query` on each query item. Example:
+
+```yaml
+app_name: CRM Platform
+app_id: crm_platform
+functions:
+  - func_name: lead_scoring
+    queries:
+      - name: active_lead_scores
+        type: sql
+        query: SELECT account_id FROM lead_scores;
+        meta:
+          owner_team: revenue_ops
+```
 
 ## Quick Start (Poetry)
 
@@ -101,6 +117,7 @@ The compose service uses:
 ```bash
 make dev-db-up
 make dev-server
+make post
 make dev-deploy
 ```
 
@@ -112,11 +129,30 @@ POSTDB_API_KEY=my-key make dev-deploy
 
 ## Deploy One App
 
+Use the client script (recommended, materializes `query_source`):
+
+```bash
+make post
+```
+
+If posting manually, send payload with `query`:
+
 ```bash
 curl -X POST "http://localhost:8000/deploy/yaml" \
   -H "Content-Type: application/x-yaml" \
   -H "X-API-Key: ${POSTDB_API_KEY}" \
-  --data-binary @apps/crm_platform/app.yaml
+  --data-binary @<(cat <<'YAML'
+app_name: CRM Platform
+app_id: crm_platform
+functions:
+  - func_name: lead_scoring
+    queries:
+      - name: active
+        type: sql
+        query: SELECT 1;
+        meta: {}
+YAML
+)
 ```
 
 ## Bulk Deploy All Apps

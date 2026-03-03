@@ -2,7 +2,6 @@ SHELL := /bin/bash
 
 POSTDB_API_KEY ?= dev-secret
 DATABASE_URL ?= postgresql://postdb:postdb@127.0.0.1:5432/postdb
-POSTDB_APPS_ROOT ?= apps
 POSTDB_API_URL ?= http://127.0.0.1:8000/deploy/yaml
 POSTDB_APPS_DIR ?= apps
 HOST ?= 127.0.0.1
@@ -10,7 +9,6 @@ PORT ?= 8000
 
 export POSTDB_API_KEY
 export DATABASE_URL
-export POSTDB_APPS_ROOT
 export POSTDB_API_URL
 export POSTDB_APPS_DIR
 

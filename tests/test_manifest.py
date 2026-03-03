@@ -15,7 +15,7 @@ functions:
     queries:
       - name: active_lead_scores
         type: sql
-        query_source: queries/active_lead_scores.sql
+        query: SELECT account_id FROM lead_scores;
         meta:
           owner_team: revenue_ops
 """
@@ -23,7 +23,7 @@ functions:
         query = manifest.app.functions[0].queries[0]
         self.assertEqual("active_lead_scores", query.name)
         self.assertEqual("sql", query.type_name)
-        self.assertEqual("queries/active_lead_scores.sql", query.query_source)
+        self.assertEqual("SELECT account_id FROM lead_scores;", query.query)
 
     def test_rejects_deprecated_query_keys(self) -> None:
         raw = """
@@ -34,13 +34,13 @@ functions:
     queries:
       - query_name: active_lead_scores
         query_type: sql
-        query: queries/active_lead_scores.sql
+        query: SELECT 1;
 """
         with self.assertRaises(ManifestError) as ctx:
             parse_manifest_yaml(raw)
         self.assertIn("deprecated keys", str(ctx.exception))
 
-    def test_rejects_multiline_query_source(self) -> None:
+    def test_rejects_missing_query(self) -> None:
         raw = """
 app_name: CRM Platform
 app_id: crm_platform
@@ -49,13 +49,26 @@ functions:
     queries:
       - name: active_lead_scores
         type: sql
-        query_source: |
-          queries/active_lead_scores.sql
-          second_line.sql
 """
         with self.assertRaises(ManifestError) as ctx:
             parse_manifest_yaml(raw)
-        self.assertIn("query_source must be a file path", str(ctx.exception))
+        self.assertIn("query is required", str(ctx.exception))
+
+    def test_accepts_query_source_as_ignored_metadata(self) -> None:
+        raw = """
+app_name: CRM Platform
+app_id: crm_platform
+functions:
+  - func_name: lead_scoring
+    queries:
+      - name: active_lead_scores
+        type: sql
+        query_source: queries/active_lead_scores.sql
+        query: SELECT account_id FROM lead_scores;
+"""
+        manifest = parse_manifest_yaml(raw)
+        query = manifest.app.functions[0].queries[0]
+        self.assertEqual("SELECT account_id FROM lead_scores;", query.query)
 
 
 if __name__ == "__main__":

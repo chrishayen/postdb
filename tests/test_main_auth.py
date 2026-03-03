@@ -82,6 +82,7 @@ functions:
       - name: active
         type: sql
         query_source: queries/active.sql
+        query: SELECT 1;
         meta: {{}}
 """
         request = build_request(body, [("X-API-Key", "secret")])

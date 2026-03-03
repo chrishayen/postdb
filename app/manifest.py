@@ -18,7 +18,7 @@ class ManifestError(ValueError):
 class QuerySpec:
     name: str
     type_name: str
-    query_source: str
+    query: Any
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,10 +119,10 @@ def parse_query_spec(
             f"App '{app_name}' function '{func_name}' queries[{query_idx}] must be a mapping."
         )
 
-    if any(k in raw_query for k in ("query_name", "query_type", "query")):
+    if any(k in raw_query for k in ("query_name", "query_type")):
         raise ManifestError(
             f"App '{app_name}' function '{func_name}' queries[{query_idx}] uses deprecated keys. "
-            "Use: name, type, query_source, meta."
+            "Use: name, type, query, meta."
         )
 
     query_name = require_non_empty_str(
@@ -133,13 +133,11 @@ def parse_query_spec(
         raw_query.get("type"),
         f"App '{app_name}' function '{func_name}' query '{query_name}' type",
     )
-    query_source = require_non_empty_str(
-        raw_query.get("query_source"),
-        f"App '{app_name}' function '{func_name}' query '{query_name}' query_source",
-    )
-    if ("\n" in query_source) or ("\r" in query_source):
+    sentinel = object()
+    query_value = raw_query.get("query", sentinel)
+    if query_value is sentinel:
         raise ManifestError(
-            f"App '{app_name}' function '{func_name}' query '{query_name}' query_source must be a file path."
+            f"App '{app_name}' function '{func_name}' query '{query_name}' query is required."
         )
 
     raw_meta = raw_query.get("meta", {})
@@ -154,7 +152,7 @@ def parse_query_spec(
     return QuerySpec(
         name=query_name,
         type_name=query_type,
-        query_source=query_source,
+        query=query_value,
         meta=meta,
     )
 

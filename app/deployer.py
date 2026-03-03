@@ -4,15 +4,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 from typing import Any
 
 from psycopg import AsyncConnection, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.config import POSTDB_APPS_ROOT
-from app.manifest import ManifestError, ManifestSpec
+from app.manifest import ManifestSpec
 
 
 AUDIT_TABLE_NAME = "manifest_deployments"
@@ -61,12 +59,6 @@ def flatten_query_rows(manifest: ManifestSpec) -> tuple[list[dict[str, Any]], in
     function_count = len(manifest.app.functions)
     for function in manifest.app.functions:
         for query in function.queries:
-            query_text = resolve_query_text(
-                app_id=manifest.app.app_id,
-                func_name=function.func_name,
-                query_name=query.name,
-                query_source=query.query_source,
-            )
             rows.append(
                 {
                     "app_name": manifest.app.app_name,
@@ -74,64 +66,11 @@ def flatten_query_rows(manifest: ManifestSpec) -> tuple[list[dict[str, Any]], in
                     "func_name": function.func_name,
                     "query_name": query.name,
                     "query_type": query.type_name,
-                    "query_source": query.query_source,
-                    "query": query_text,
+                    "query": query.query,
                     "meta": query.meta,
                 }
             )
     return rows, function_count
-
-
-def resolve_query_text(
-    *,
-    app_id: str,
-    func_name: str,
-    query_name: str,
-    query_source: str,
-) -> str:
-    apps_root = Path(POSTDB_APPS_ROOT).resolve()
-    app_dir = (apps_root / app_id).resolve()
-    if not app_dir.is_dir():
-        raise ManifestError(
-            f"App '{app_id}' directory not found under '{apps_root}' while resolving query "
-            f"for function '{func_name}', query '{query_name}'."
-        )
-
-    relative_path = Path(query_source)
-    if relative_path.is_absolute():
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' must use a relative query_source path."
-        )
-
-    query_path = (app_dir / relative_path).resolve()
-    try:
-        query_path.relative_to(app_dir)
-    except ValueError as exc:
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' path escapes app directory."
-        ) from exc
-
-    if not query_path.is_file():
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' file not found: {relative_path}"
-        )
-
-    try:
-        query_text = query_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as exc:
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' must be UTF-8 text."
-        ) from exc
-    except OSError as exc:
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' could not be read: {exc}"
-        ) from exc
-
-    if not query_text.strip():
-        raise ManifestError(
-            f"App '{app_id}' function '{func_name}' query '{query_name}' file is empty."
-        )
-    return query_text
 
 
 async def ensure_audit_table(conn: AsyncConnection[Any]) -> None:
@@ -164,8 +103,7 @@ async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, lis
                     func_name VARCHAR(255) NOT NULL,
                     query_name VARCHAR(255) NOT NULL,
                     query_type VARCHAR(100) NOT NULL,
-                    query_source VARCHAR(1024) NOT NULL,
-                    query TEXT NOT NULL,
+                    query JSONB NOT NULL,
                     meta JSONB NOT NULL,
                     CONSTRAINT pk_app_queries PRIMARY KEY (app_id, func_name, query_name)
                 )
@@ -175,14 +113,24 @@ async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, lis
         return True, 0, warnings
 
     existing_columns = await get_table_columns(conn, QUERY_TABLE_NAME)
+    if "query_source" in existing_columns:
+        await conn.execute(
+            sql.SQL("ALTER TABLE {} ALTER COLUMN {} SET DEFAULT ''").format(
+                sql.Identifier(QUERY_TABLE_NAME),
+                sql.Identifier("query_source"),
+            )
+        )
+        warnings.append(
+            f"Set default value for legacy 'query_source' column on '{QUERY_TABLE_NAME}'."
+        )
+
     required_columns = {
         "app_name": "VARCHAR(255)",
         "app_id": "VARCHAR(255)",
         "func_name": "VARCHAR(255)",
         "query_name": "VARCHAR(255)",
         "query_type": "VARCHAR(100)",
-        "query_source": "VARCHAR(1024)",
-        "query": "TEXT",
+        "query": "JSONB",
         "meta": "JSONB",
     }
 
@@ -200,6 +148,19 @@ async def ensure_query_table(conn: AsyncConnection[Any]) -> tuple[bool, int, lis
         columns_added += 1
         warnings.append(
             f"Added missing column '{column_name}' to existing '{QUERY_TABLE_NAME}' table."
+        )
+
+    query_column_type = await get_column_type(conn, QUERY_TABLE_NAME, "query")
+    if query_column_type and query_column_type != "jsonb":
+        await conn.execute(
+            sql.SQL("ALTER TABLE {} ALTER COLUMN {} TYPE JSONB USING to_jsonb({})").format(
+                sql.Identifier(QUERY_TABLE_NAME),
+                sql.Identifier("query"),
+                sql.Identifier("query"),
+            )
+        )
+        warnings.append(
+            f"Converted column 'query' to JSONB on existing '{QUERY_TABLE_NAME}' table."
         )
 
     constrained_columns = await get_primary_key_columns(conn, QUERY_TABLE_NAME)
@@ -242,6 +203,24 @@ async def get_table_columns(conn: AsyncConnection[Any], table_name: str) -> set[
         )
         rows = await cur.fetchall()
     return {str(row[0]) for row in rows}
+
+
+async def get_column_type(conn: AsyncConnection[Any], table_name: str, column_name: str) -> str | None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = %s
+              AND column_name = %s
+            """,
+            (table_name, column_name),
+        )
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0])
 
 
 async def get_primary_key_columns(conn: AsyncConnection[Any], table_name: str) -> list[str]:
@@ -287,7 +266,7 @@ async def upsert_query_rows(
             await cur.execute(
                 sql.SQL(
                     """
-                    SELECT query_type, query_source, query, meta
+                    SELECT query_type, query, meta
                     FROM {}
                     WHERE app_id = %s
                       AND func_name = %s
@@ -310,7 +289,6 @@ async def upsert_query_rows(
                         UPDATE {}
                         SET app_name = %s,
                             query_type = %s,
-                            query_source = %s,
                             query = %s,
                             meta = %s
                         WHERE app_id = %s
@@ -321,8 +299,7 @@ async def upsert_query_rows(
                     (
                         row["app_name"],
                         row["query_type"],
-                        row["query_source"],
-                        row["query"],
+                        Jsonb(row["query"]),
                         Jsonb(row["meta"]),
                         row["app_id"],
                         row["func_name"],
@@ -342,11 +319,10 @@ async def upsert_query_rows(
                         func_name,
                         query_name,
                         query_type,
-                        query_source,
                         query,
                         meta
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """
                 ).format(sql.Identifier(QUERY_TABLE_NAME)),
                 (
@@ -355,8 +331,7 @@ async def upsert_query_rows(
                     row["func_name"],
                     row["query_name"],
                     row["query_type"],
-                    row["query_source"],
-                    row["query"],
+                    Jsonb(row["query"]),
                     Jsonb(row["meta"]),
                 ),
             )
@@ -390,7 +365,7 @@ async def upsert_query_rows(
 
 
 def row_has_mutation(incoming: dict[str, Any], existing: dict[str, Any]) -> bool:
-    for field in ("query_type", "query_source", "query", "meta"):
+    for field in ("query_type", "query", "meta"):
         if normalize_value(incoming.get(field)) != normalize_value(existing.get(field)):
             return True
     return False
